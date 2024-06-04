@@ -1,54 +1,37 @@
 import numpy as np
-import keras
-import tensorflow as tf
-from utils.config import Config
-import matplotlib.pyplot as plt
-config = Config()
-def generate_anchors(sizes=None, ratios=None):
-    if sizes is None:
-        sizes = config.anchor_box_scales
-    if ratios is None:
-        ratios = config.anchor_box_ratios
-    num_anchors = len(sizes) * len(ratios)
-    anchors = np.zeros((num_anchors, 4))
-    anchors[:, 2:] = np.tile(sizes, (2, len(ratios))).T
-    for i in range(len(ratios)):
-        anchors[3 * i:3 * i + 3, 2] = anchors[3 * i:3 * i + 3, 2] * ratios[i][0]
-        anchors[3 * i:3 * i + 3, 3] = anchors[3 * i:3 * i + 3, 3] * ratios[i][1]
-    anchors[:, 0::2] -= np.tile(anchors[:, 2] * 0.5, (2, 1)).T
-    anchors[:, 1::2] -= np.tile(anchors[:, 3] * 0.5, (2, 1)).T
+import math
+from  utils.utils import norm_boxes
+def generate_config(scales,ratios,shape,feature_stride,anchor_stride):
+    scales,ratios=np.meshgrid(np.array(scales),np.array(ratios))
+    scales=scales.flatten()
+    ratios=ratios.flatten()
+    heights=scales/np.sqrt(ratios)
+    widths=scales*np.sqrt(ratios)
+    shift_x=np.arange(0,shape[1],anchor_stride)*feature_stride
+    shift_y = np.arange(0, shape[0], anchor_stride) * feature_stride
+    shift_y,shift_x =np.meshgrid(shift_y,shift_x)
+    box_widths,center_x=np.meshgrid(shift_x,widths)
+    box_heights, center_y = np.meshgrid(shift_y, heights)
+    boxes_centers=np.stack([center_x,center_y],axis=2).reshape([-1,2])
+    boxes_sizes=np.stack([box_widths,box_heights],axis=2).reshape([-1,2])
+    boxes=np.concatenate([boxes_centers-0.5*boxes_sizes,boxes_centers+0.5*boxes_sizes],axis=1)
+    return boxes
+def generate_pyramid_shape(scales,ratios,feature_stride,feature_shapes,anchor_strides):
+    anchors=[]
+    for i in range(len(scales)):
+        anchors.append(scales[i],ratios,feature_stride[i],feature_shapes[i],anchor_strides[i])
     return anchors
-def shift(shape, anchors, stride=config.rpn_stride):
-    shift_x = (np.arange(0, shape[0], dtype=keras.backend.floatx()) + 0.5) * stride
-    shift_y = (np.arange(0, shape[1], dtype=keras.backend.floatx()) + 0.5) * stride
+def generate_anchor_shape(config,image_shape):
+    if callable(config.BACKBONE):
+        return config.COMPUTE_BACKBONE_SHAPE(image_shape)
+    assert config.BACKBONE in ['resnet50','resnet101']
+    return np.array([[int(math.ceil(image_shape[0]/stride)),int(math.ceil(image_shape[1]/stride))]for stride in config.BACKBONE_STRIDES])
+def get_anchor(config,image_shape):
+    backbone_shapes=generate_anchor_shape(config,image_shape)
+    anchor_cache={}
+    if not tuple(image_shape) in anchor_cache:
+        a=generate_pyramid_shape(config.RPN_ANCHOR_SCALES,config.BACKBONE_STRIDES,backbone_shapes,config.RPN_AHCHOR_RATIOS,config.BACKBONE_STRIDES)
+        anchor_cache[tuple(image_shape)]=norm_boxes(a,image_shape[:2])
+    return anchor_cache[tuple(image_shape)]
 
-    shift_x, shift_y = np.meshgrid(shift_x, shift_y)
 
-    shift_x = np.reshape(shift_x, [-1])
-    shift_y = np.reshape(shift_y, [-1])
-
-    shifts = np.stack([
-        shift_x,
-        shift_y,
-        shift_x,
-        shift_y
-    ], axis=0)
-
-    shifts = np.transpose(shifts)
-    number_of_anchors = np.shape(anchors)[0]
-
-    k = np.shape(shifts)[0]
-
-    shifted_anchors = np.reshape(anchors, [1, number_of_anchors, 4]) + np.array(np.reshape(shifts, [k, 1, 4]),
-                                                                                keras.backend.floatx())
-    shifted_anchors = np.reshape(shifted_anchors, [k * number_of_anchors, 4])
-    return shifted_anchors
-def get_anchors(shape, width, height):
-    anchors = generate_anchors()
-    network_anchors = shift(shape, anchors)
-    network_anchors[:, 0] = network_anchors[:, 0] / width
-    network_anchors[:, 1] = network_anchors[:, 1] / height
-    network_anchors[:, 2] = network_anchors[:, 2] / width
-    network_anchors[:, 3] = network_anchors[:, 3] / height
-    network_anchors = np.clip(network_anchors, 0, 1)
-    return network_anchors
